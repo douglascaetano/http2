@@ -1,3 +1,11 @@
+server
+server.exe
+client
+client.exe
+
+# dependency dir
+.d
+
 # Object files
 *.o
 

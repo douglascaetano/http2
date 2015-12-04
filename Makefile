@@ -1,7 +1,7 @@
 # Parts of this Makefile where took from
 # http://make.mad-scientist.net/papers/advanced-auto-dependency-generation/
 
-CFLAGS = -Werror -Wall
+CFLAGS = -Werror -Wall -g
 
 LIBS = -levent
 
@@ -11,8 +11,8 @@ DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
 CC = gcc
 LD = gcc
 
-SERVER_SOURCES = server.c
-CLIENT_SOURCES = client.c
+SERVER_SOURCES = server.c http2.c
+CLIENT_SOURCES = client.c http2.c
 
 .PHONY: all clean
 

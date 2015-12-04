@@ -16,6 +16,7 @@
 #include <event2/event.h>
 
 #include "defines.h"
+#include "http2.h"
 #include "util.h"
 
 #include "server.h"
@@ -24,7 +25,7 @@
 struct event_base *evbase;
 struct event *evsock;
 
-void usage(void);
+static void usage(void);
 
 int
 main(int argc, char *argv[])
@@ -64,7 +65,7 @@ main(int argc, char *argv[])
 	}
 
 	/* Creates an event notification for the listening socket */
-	evsock = event_new(evbase, sockfd, EV_READ|EV_WRITE, server_accept, NULL);
+	evsock = event_new(evbase, sockfd, EV_READ, server_accept, NULL);
 	if (evsock == NULL) {
 		close(sockfd);
 		event_base_free(evbase);
@@ -73,7 +74,6 @@ main(int argc, char *argv[])
 	}
 	if (event_add(evsock, NULL) < 0) {
 		close(sockfd);
-		event_free(evsock);
 		event_base_free(evbase);
 		prterr("event_add: failure.");
 		exit(1);
@@ -81,15 +81,10 @@ main(int argc, char *argv[])
 
 	/* Dispatch events */
 	r = event_base_dispatch(evbase);
-	if (r < 0) {
-		close(sockfd);
-		event_free(evsock);
-		event_base_free(evbase);
+	if (r < 0)
 		prterr("event_base_dispatch: failure.");
-		exit(1);
-	}
 
-	event_free(evsock);
+	close(sockfd);
 	event_base_free(evbase);
 	return 0;
 }
@@ -97,12 +92,10 @@ main(int argc, char *argv[])
 void
 server_accept(evutil_socket_t fd, short events, void *arg)
 {
-	const char msg[] = "Welcome! Good bye!\n";
 	char ip[INET_ADDRSTRLEN];
 	struct sockaddr_in addr;
 	socklen_t addrlen;
 	int connfd;
-	ssize_t s;
 
 	/* Rearms the listening socket's event */
 	event_add(evsock, NULL);
@@ -115,29 +108,12 @@ server_accept(evutil_socket_t fd, short events, void *arg)
 		return;
 	}
 
-	/* Gets client's IP */
-	inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-
 	/* Prints information on accepted connection */
-	printf(
-	    "\n=====\n"
-	    "New connection received (fd %d) from %s:%d\n",
+	inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+	printf("(%d) new connection received from %s:%d\n",
 	    connfd, ip, ntohs(addr.sin_port));
 
-	/* Sends some info to client */
-	s = send(connfd, msg, sizeof(msg), 0);
-	if (s < 0)
-		perror("send");
-	else if (s < sizeof(msg))
-		prterr("send: connection from %s could not receive all data at once.", ip);
-	else
-		printf("Data fully sent.\n");
-
-	/* Closes connection */
-	if (close(connfd) < 0)
-		perror("close");
-	else
-		printf("Connection closed.\n");
+	http2_connection_new(connfd, evbase);
 }
 
 int
@@ -186,7 +162,7 @@ server_listen(char *port)
 	return fd;
 }
 
-void
+static void
 usage(void)
 {
 	extern char *__progname;

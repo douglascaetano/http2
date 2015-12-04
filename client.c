@@ -16,19 +16,21 @@
 #include <event2/event.h>
 
 #include "defines.h"
+#include "http2.h"
 #include "util.h"
 
 #include "client.h"
 
 /* libevent's structures */
 struct event_base *evbase;
-struct event *evsock;
 
 static void usage(void);
 
 int
 main(int argc, char *argv[])
 {
+	struct http2_connection *conn;
+	struct http2_frame *fr;
 	int sockfd;
 	int r;
 	char *host;
@@ -69,58 +71,28 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	/* Creates an event notification for reading on the socket */
-	evsock = event_new(evbase, sockfd, EV_READ, client_read, NULL);
-	if (evsock == NULL) {
-		close(sockfd);
-		event_base_free(evbase);
-		prterr("event_new: failure\n");
-		exit(1);
-	}
-	if (event_add(evsock, NULL) < 0) {
-		close(sockfd);
-		event_free(evsock);
-		event_base_free(evbase);
-		prterr("event_add: failure\n");
-		exit(1);
-	}
+	/* Creates a new HTTP/2 connection */
+	conn = http2_connection_new(sockfd, evbase);
+
+	char msg[] = "Mensagem legal.\n";
+
+	fr = http2_frame_new(conn);
+	fr->fr_header.fh_length = sizeof(msg);
+	fr->fr_header.fh_type = 0x12;
+	fr->fr_header.fh_streamid = 123;
+	fr->fr_buf = malloc(sizeof msg);
+	memcpy(fr->fr_buf, msg, sizeof msg);
+
+	http2_frame_send(fr);
 
 	/* Dispatch events */
 	r = event_base_dispatch(evbase);
-	if (r < 0) {
-		close(sockfd);
-		event_free(evsock);
-		event_base_free(evbase);
+	if (r < 0)
 		prterr("event_base_dispatch: failure\n");
-		exit(1);
-	}
 
-	event_free(evsock);
+	http2_connection_free(conn);
 	event_base_free(evbase);
 	return 0;
-}
-
-void
-client_read(evutil_socket_t fd, short events, void *arg)
-{
-	char buf[100];
-	size_t len;
-	ssize_t s;
-
-	/* Reads received data */
-	len = sizeof(buf);
-	s = recv(fd, buf, len, 0);
-	if (s < 0)
-		perror("recv");
-	else if (s == 0)
-		/* connection was closed */
-		return;
-
-	/* Prints received information */
-	printf("%s", buf);
-
-	/* Rearms event */
-	event_add(evsock, NULL);
 }
 
 int
