@@ -13,3 +13,6 @@ client.exe
 *.sw[po]
 *~
 
+# cscope and ctags
+cscope.out
+tags
