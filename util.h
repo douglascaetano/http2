@@ -18,7 +18,7 @@ extern char *__progname;
 
 #if DEBUG >= DEBUG_ERROR
 # define prterr(fmt, args...) fprintf(stderr, "%s:%d:" fmt "\n", __FILE__, __LINE__, ##args)
-# define prterrno(func) fprintf(stderr, func ": %s", strerror(errno))
+# define prterrno(func) prterr(func ": %s", strerror(errno))
 #else
 # define prterr(fmt, args...)
 # define prterrno(func)

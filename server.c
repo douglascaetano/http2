@@ -92,8 +92,9 @@ main(int argc, char *argv[])
 void
 server_accept(evutil_socket_t fd, short events, void *arg)
 {
-	char ip[INET_ADDRSTRLEN];
+	struct http2_connection *conn;
 	struct sockaddr_in addr;
+	char ip[INET_ADDRSTRLEN];
 	socklen_t addrlen;
 	int connfd;
 
@@ -110,10 +111,23 @@ server_accept(evutil_socket_t fd, short events, void *arg)
 
 	/* Prints information on accepted connection */
 	inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-	printf("(%d) new connection received from %s:%d\n",
+	prtinfo("(%d) new connection received from %s:%d\n",
 	    connfd, ip, ntohs(addr.sin_port));
 
-	http2_connection_new(connfd, evbase);
+	/* Creates a new connection object */
+	conn = http2_connection_new(connfd, evbase);
+	if (conn == NULL) {
+		prterr("http2_connection_new: failure.");
+		close(connfd);
+		return;
+	}
+
+	/* Sends preface: first SETTINGS frame */
+	if (http2_settings_send(conn, NULL, 0) < 0) {
+		prterr("http2_settings_send: failure.");
+		http2_connection_free(conn);
+		return;
+	}
 }
 
 int

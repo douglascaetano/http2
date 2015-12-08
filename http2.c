@@ -26,6 +26,16 @@ static void http2_connection_write(evutil_socket_t, short, void *);
 static void http2_frame_free(struct http2_frame *);
 
 static int http2_frame_recv(struct http2_frame *);
+static int http2_frame_send(struct http2_frame *);
+
+static int http2_frame_settings_handler(struct http2_frame *);
+static int http2_frame_settings_send(struct http2_connection *, struct http2_setting *, int, int);
+
+/* Frame handlers */
+struct http2_frame_handler http2_frame_handlers[] = {
+	{ HTTP2_FRAME_SETTINGS, http2_frame_settings_handler },
+	{ -1, NULL }
+};
 
 struct http2_connection *
 http2_connection_new(int sockfd, struct event_base *evbase)
@@ -147,19 +157,21 @@ http2_connection_read(evutil_socket_t sockfd, short events, void *arg)
 
 	fr = conn->cn_rxframe;
 
-	/* Receives remaining bytes */
+	/* Receives remaining bytes, if there is any to receive */
 	len = fr->fr_header.fh_length - fr->fr_buflen;
-	bytes = recv(sockfd, &fr->fr_buf[fr->fr_buflen], len, 0);
-	if (bytes < 0) {
-		prterrno("recv");
-		goto error;
-	}
-	else if (bytes == 0) {
-		prterr("recv: connection was closed.");
-		goto error;
-	}
+	if (len != 0) {
+		bytes = recv(sockfd, &fr->fr_buf[fr->fr_buflen], len, 0);
+		if (bytes < 0) {
+			prterrno("recv");
+			goto error;
+		}
+		else if (bytes == 0) {
+			prterr("recv: connection was closed.");
+			goto error;
+		}
 
-	fr->fr_buflen += bytes;
+		fr->fr_buflen += bytes;
+	}
 
 	/* Checks buffer overflow */
 	if (fr->fr_buflen > fr->fr_header.fh_length) {
@@ -216,7 +228,7 @@ http2_connection_write(evutil_socket_t sockfd, short events, void *arg)
 		buf[6] = (fr->fr_header.fh_streamid & 0x00FF0000U) >> 16;
 		buf[7] = (fr->fr_header.fh_streamid & 0x0000FF00U) >>  8;
 		buf[8] = (fr->fr_header.fh_streamid & 0x000000FFU);
-		bytes = send(fr->fr_conn->cn_sockfd, buf, sizeof(buf), 0);
+		bytes = send(sockfd, buf, sizeof(buf), 0);
 		if (bytes < 0) {
 			prterrno("send");
 			goto error;
@@ -227,6 +239,9 @@ http2_connection_write(evutil_socket_t sockfd, short events, void *arg)
 			goto error;
 		}
 		fr->fr_buflen = 0;
+
+		prtinfo("(%d) Header for frame of type 0x%02x was sent.",
+		    sockfd, fr->fr_header.fh_type);
 	}
 
 	/* Sends remaining bytes */
@@ -251,28 +266,30 @@ http2_connection_write(evutil_socket_t sockfd, short events, void *arg)
 
 		next = fr->fr_next;
 
+		prtinfo("(%d) Frame of type 0x%02x was fully sent. (size=%d)",
+		    sockfd, fr->fr_header.fh_type, fr->fr_header.fh_length);
+
 		http2_frame_free(fr);
 
 		/* Returns without rearming writing event if no other frames
 		 * are to be sent */
-		if (next == NULL)
+		if (next == NULL) {
+			conn->cn_txframe = NULL;
 			return;
-
-		if (http2_frame_send(next) < 0) {
-			prterr("http2_frame_send: failure.");
-			goto error;
 		}
+
+		conn->cn_txframe = next;
 	}
 
 	/* Rearms writing event */
-	if (event_add(fr->fr_conn->cn_wrevent, NULL) < 0) {
+	if (event_add(conn->cn_wrevent, NULL) < 0) {
 		prterr("event_add: failure.");
 		goto error;
 	}
 	return;
 
 error:
-	http2_connection_free(fr->fr_conn);
+	http2_connection_free(conn);
 	return;
 }
 
@@ -309,24 +326,27 @@ http2_frame_free(struct http2_frame *fr)
 static int
 http2_frame_recv(struct http2_frame *fr)
 {
-	struct http2_frame_header *hdr;
+	struct http2_frame_handler *fh;
 
 	if (fr == NULL)
 		return -1;
 
-	hdr = &fr->fr_header;
+	prtinfo("(%d) RX frame: len=%d type=%02x flags=%02x stream=%d\n",
+	    fr->fr_conn->cn_sockfd, fr->fr_header.fh_length, fr->fr_header.fh_type,
+	    fr->fr_header.fh_flags, fr->fr_header.fh_streamid);
 
-	printf("(%d) RX frame: len=%d type=%02x flags=%02x stream=%d\n",
-	    fr->fr_conn->cn_sockfd, hdr->fh_length, hdr->fh_type,
-	    hdr->fh_flags, hdr->fh_streamid);
+	/* Looks for and calls handler for this frame type */
+	for (fh = http2_frame_handlers; fh->fh_type != -1; fh++)
+		if (fh->fh_type == fr->fr_header.fh_type)
+			return fh->fh_handler(fr);
 
-	printf("%s\n", fr->fr_buf);
-
+	/* Not supported frames must be ignored and discarded */
+	prtinfo("(%d) Unsupported frame type - ignored.", fr->fr_conn->cn_sockfd);
 	http2_frame_free(fr);
 	return 0;
 }
 
-int
+static int
 http2_frame_send(struct http2_frame *fr)
 {
 	if (fr == NULL)
@@ -339,6 +359,9 @@ http2_frame_send(struct http2_frame *fr)
 		fr->fr_conn->cn_txlastframe->fr_next = fr;
 	fr->fr_conn->cn_txlastframe = fr;
 
+	prtinfo("(%d) Frame of type 0x%02x enqueued for sending. (size=%d)",
+	    fr->fr_conn->cn_sockfd, fr->fr_header.fh_type, fr->fr_header.fh_length);
+
 	/* Arms writing event */
 	if (event_add(fr->fr_conn->cn_wrevent, NULL) < 0) {
 		prterr("event_add: failure.");
@@ -347,5 +370,120 @@ http2_frame_send(struct http2_frame *fr)
 	}
 
 	return 0;
+}
+
+static int
+http2_frame_settings_handler(struct http2_frame *fr)
+{
+	int pos;
+
+	/* Checks frame size */
+	if ((!(fr->fr_header.fh_flags & HTTP2_FRAME_SETTINGS_ACK) &&
+	    fr->fr_header.fh_length % HTTP2_FRAME_SETTINGS_PARAM_SIZE != 0) ||
+	    (fr->fr_header.fh_flags & HTTP2_FRAME_SETTINGS_ACK &&
+	    fr->fr_header.fh_length != 0)) {
+		/* TODO connection error: FRAME_SIZE_ERROR */
+		prtinfo("(%d) Connection error: "
+		    "SETTINGS frame with wrong frame size "
+		    "(size=%d,ack=%d)",
+		    fr->fr_conn->cn_sockfd, fr->fr_header.fh_length,
+		    fr->fr_header.fh_flags & HTTP2_FRAME_SETTINGS_ACK);
+		return -1;
+	}
+
+	/* Checks stream ID */
+	if (fr->fr_header.fh_streamid != 0) {
+		/* TODO connection error: PROTOCOL_ERROR */
+		prtinfo("(%d) Connection error: "
+		    "SETTINGS frame with wrong stream ID "
+		    "(id=%d)",
+		    fr->fr_conn->cn_sockfd,
+		    fr->fr_header.fh_streamid);
+		return -1;
+	}
+
+	/* On ACK reception, the new requested frames can be set definitely */
+	if (fr->fr_header.fh_flags & HTTP2_FRAME_SETTINGS_ACK) {
+		/* TODO set new settings definitely */
+		prtinfo("(%d) Previously sent SETTINGS frame acknowledged.",
+		    fr->fr_conn->cn_sockfd);
+		return 0;
+	}
+
+	prtinfo("(%d) SETTINGS frame received with %d setting(s).",
+	    fr->fr_conn->cn_sockfd,
+	    fr->fr_header.fh_length / HTTP2_FRAME_SETTINGS_PARAM_SIZE);
+
+	/* Saves remote's settings */
+	for (pos = 0; pos < fr->fr_header.fh_length;
+	    pos += HTTP2_FRAME_SETTINGS_PARAM_SIZE) {
+		struct http2_setting set;
+		char *ptr;
+
+		ptr = &fr->fr_buf[pos];
+
+		set.set_id = ptr[0] << 8 | ptr[1];
+		set.set_value = ptr[2] << 24 | ptr[3] << 16 | ptr[4] << 8 | ptr[5];
+		/* TODO set settings!
+		http2_setting_set(set);
+		*/
+		prtinfo("(%d) New setting: "
+		    "[0x%04x] = 0x%08x.",
+		    fr->fr_conn->cn_sockfd,
+		    set.set_id, set.set_value);
+	}
+
+	/* Sends ACK to remote peer */
+	if (http2_frame_settings_send(fr->fr_conn, NULL, 0, 1) < 0) {
+		prterr("http2_frame_settings_send: failure.");
+		return -1;
+	}
+
+	prtinfo("(%d) SETTINGS ACK frame sent back to remote.",
+	    fr->fr_conn->cn_sockfd);
+
+	http2_frame_free(fr);
+
+	return 0;
+}
+
+static int
+http2_frame_settings_send(struct http2_connection *conn,
+    struct http2_setting *set, int nsets, int ack)
+{
+	struct http2_frame *fr;
+
+	fr = http2_frame_new(conn);
+	if (fr == NULL) {
+		prterr("http2_frame_new: failure.");
+		return -1;
+	}
+
+	fr->fr_header.fh_type = HTTP2_FRAME_SETTINGS;
+	fr->fr_header.fh_streamid = 0;
+
+	if (ack) {
+		/* Creates an empty frame with only the ACK flag set */
+		fr->fr_header.fh_length = 0;
+		fr->fr_header.fh_flags = HTTP2_FRAME_SETTINGS_ACK;
+	}
+	else
+		fr->fr_header.fh_length = nsets * HTTP2_FRAME_SETTINGS_PARAM_SIZE;
+
+	prtinfo("(%d) SETTINGS frame being sent (nsets=%d,ack=%d).",
+	    conn->cn_sockfd, nsets, ack);
+
+	if (http2_frame_send(fr) < 0) {
+		prterr("http2_frame_send: failure.");
+		return -1;
+	}
+
+	return 0;
+}
+
+int
+http2_settings_send(struct http2_connection *conn, struct http2_setting *set, int nsets)
+{
+	return http2_frame_settings_send(conn, set, nsets, 0);
 }
 

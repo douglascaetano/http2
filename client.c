@@ -30,7 +30,6 @@ int
 main(int argc, char *argv[])
 {
 	struct http2_connection *conn;
-	struct http2_frame *fr;
 	int sockfd;
 	int r;
 	char *host;
@@ -48,11 +47,11 @@ main(int argc, char *argv[])
 			usage();
 		}
 	}
-	host = argv[optind];
-	if (host == NULL) {
+	if (optind >= argc) {
 		prterr("missing host to connect to.");
 		usage();
 	}
+	host = argv[optind];
 
 	printf("HTTP/2 client\n");
 
@@ -73,17 +72,15 @@ main(int argc, char *argv[])
 
 	/* Creates a new HTTP/2 connection */
 	conn = http2_connection_new(sockfd, evbase);
+	if (conn == NULL) {
+		close(sockfd);
+		prterr("http2_connection_new: failure.");
+		exit(1);
+	}
 
-	char msg[] = "Mensagem legal.\n";
-
-	fr = http2_frame_new(conn);
-	fr->fr_header.fh_length = sizeof(msg);
-	fr->fr_header.fh_type = 0x12;
-	fr->fr_header.fh_streamid = 123;
-	fr->fr_buf = malloc(sizeof msg);
-	memcpy(fr->fr_buf, msg, sizeof msg);
-
-	http2_frame_send(fr);
+	/* Sends client preface: sends starting sequence and a SETTINGS frame */
+	/* TODO send starting sequence */
+	http2_settings_send(conn, NULL, 0);
 
 	/* Dispatch events */
 	r = event_base_dispatch(evbase);
