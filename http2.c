@@ -32,10 +32,10 @@ http2_connection_new(int sockfd, struct event_base *evbase)
 {
 	struct http2_connection *conn;
 
+	/* Allocates structure */
 	conn = calloc(1, sizeof(*conn));
 	if (conn == NULL) {
-		perror("calloc");
-		close(sockfd);
+		prterrno("calloc");
 		return NULL;
 	}
 
@@ -44,16 +44,15 @@ http2_connection_new(int sockfd, struct event_base *evbase)
 	    http2_connection_read, conn);
 	if (conn->cn_event == NULL) {
 		prterr("event_new: failure.");
-		close(sockfd);
 		free(conn);
 		return NULL;
 	}
 
 	if (event_add(conn->cn_event, NULL) < 0) {
+	/* Arms reading event */
 		prterr("event_add: failure.");
 		event_free(conn->cn_event);
 		free(conn);
-		close(sockfd);
 		return NULL;
 	}
 
@@ -132,7 +131,7 @@ http2_connection_read(evutil_socket_t sockfd, short events, void *arg)
 		/* Receives header */
 		bytes = recv(sockfd, buf, sizeof(buf), 0);
 		if (bytes < 0) {
-			perror("recv");
+			prterrno("recv");
 			goto error;
 		}
 		else if (bytes == 0) {
@@ -145,7 +144,7 @@ http2_connection_read(evutil_socket_t sockfd, short events, void *arg)
 			goto error;
 		}
 
-		/* Creates a new struct frame */
+		/* Creates a new frame */
 		conn->cn_rxframe = http2_frame_new(conn);
 		if (conn->cn_rxframe == NULL) {
 			prterr("http2_frame_new: failure.");
@@ -171,17 +170,12 @@ http2_connection_read(evutil_socket_t sockfd, short events, void *arg)
 
 	fr = conn->cn_rxframe;
 
-	/* Calculates remaining bytes to receive and receives them */
+	/* Receives remaining bytes */
 	len = fr->fr_header.fh_length - fr->fr_buflen;
-	bytes = recv(sockfd, &fr->fr_buf[fr->fr_buflen], len, MSG_DONTWAIT);
+	bytes = recv(sockfd, &fr->fr_buf[fr->fr_buflen], len, 0);
 	if (bytes < 0) {
-		/* no data waiting to be read */
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
-			goto end;
-		else {
-			perror("recv");
-			goto error;
-		}
+		prterrno("recv");
+		goto error;
 	}
 	else if (bytes == 0) {
 		prterr("recv: connection was closed.");
@@ -196,15 +190,15 @@ http2_connection_read(evutil_socket_t sockfd, short events, void *arg)
 		goto error;
 	}
 
-	/* frame not yet fully received */
-	if (fr->fr_buflen < fr->fr_header.fh_length)
-		goto end;
+	/* Handles fully received frame */
+	if (fr->fr_buflen == fr->fr_header.fh_length) {
+		if (http2_frame_recv(fr) < 0) {
+			prterr("http2_frame_recv: failure.");
+			goto error;
+		}
+		conn->cn_rxframe = NULL;
+	}
 
-	/* Handles frame */
-	http2_frame_recv(fr);
-	conn->cn_rxframe = NULL;
-
-end:
 	if (event_add(conn->cn_event, NULL) < 0) {
 		prterr("event_add: failure.");
 		goto error;
@@ -213,7 +207,6 @@ end:
 
 error:
 	http2_connection_free(conn);
-	close(sockfd);
 	return;
 }
 
@@ -246,20 +239,23 @@ http2_connection_write(evutil_socket_t sockfd, short events, void *arg)
 		goto error;
 	}
 
-	/* frame fully sent */
+	/* Frees fully sent frame and sends next on list */
 	if (fr->fr_buflen == fr->fr_header.fh_length) {
 		struct http2_frame *next;
 
-		/* Gets next frame on list */
 		next = fr->fr_next;
-		
+
 		http2_frame_free(fr);
 
-		/* Sends next frame */
-		if (next != NULL)
-			http2_frame_send(next);
+		/* Returns without rearming writing event if no other frames
+		 * are to be sent */
+		if (next == NULL)
+			return;
 
-		return;
+		if (http2_frame_send(next) < 0) {
+			prterr("http2_frame_send: failure.");
+			goto error;
+		}
 	}
 
 end:
@@ -287,6 +283,8 @@ http2_frame_recv(struct http2_frame *fr)
 	printf("(%d) RX frame: len=%d type=%02x flags=%02x stream=%d\n",
 	    fr->fr_conn->cn_sockfd, hdr->fh_length, hdr->fh_type,
 	    hdr->fh_flags, hdr->fh_streamid);
+
+	printf("%s\n", fr->fr_buf);
 
 	http2_frame_free(fr);
 	return 0;

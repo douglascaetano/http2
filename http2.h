@@ -14,12 +14,20 @@ struct http2_frame_header {
 	uint32_t fh_streamid;
 };
 
+/**
+ * Frame structure
+ *
+ * fr_buflen:
+ *   Informs how much of data on buffer was already filled/consumed.
+ *   If fr_buflen == -1, header has not yet been received/sent. In this case, when
+ *   receiving, buffer will not be allocated yet.
+ */
 struct http2_frame {
 	struct http2_connection *fr_conn;
 	struct event *fr_event;
 	struct http2_frame_header fr_header;
 	char *fr_buf;
-	size_t fr_buflen; /* data length on buffer */
+	size_t fr_buflen;
 	struct http2_frame *fr_next;
 };
 
