@@ -1,7 +1,7 @@
 # Parts of this Makefile where took from
 # http://make.mad-scientist.net/papers/advanced-auto-dependency-generation/
 
-CFLAGS = -Werror -Wall -g
+CFLAGS = -Werror -Wall -g -DDEBUG=1
 
 LIBS = -levent
 
@@ -26,7 +26,7 @@ client: $(CLIENT_SOURCES:.c=.o)
 	@echo "  LD  $@"
 	@$(LD) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-%.o: %.c $(DEPDIR)/%.d
+%.o: %.c $(DEPDIR)/%.d Makefile
 	@echo "  CC  $<"
 	@$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 	@mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d
