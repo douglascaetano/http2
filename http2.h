@@ -24,7 +24,6 @@ struct http2_frame_header {
  */
 struct http2_frame {
 	struct http2_connection *fr_conn;
-	struct event *fr_event;
 	struct http2_frame_header fr_header;
 	char *fr_buf;
 	size_t fr_buflen;
@@ -33,7 +32,8 @@ struct http2_frame {
 
 struct http2_connection {
 	int cn_sockfd;
-	struct event *cn_event;
+	struct event *cn_rdevent;
+	struct event *cn_wrevent;
 	struct http2_frame *cn_rxframe;
 	struct http2_frame *cn_txframe;
 	struct http2_frame *cn_txlastframe;

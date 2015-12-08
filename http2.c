@@ -20,10 +20,10 @@
 
 #include "http2.h"
 
-static void http2_frame_free(struct http2_frame *);
-
 static void http2_connection_read(evutil_socket_t, short, void *);
 static void http2_connection_write(evutil_socket_t, short, void *);
+
+static void http2_frame_free(struct http2_frame *);
 
 static int http2_frame_recv(struct http2_frame *);
 
@@ -39,19 +39,24 @@ http2_connection_new(int sockfd, struct event_base *evbase)
 		return NULL;
 	}
 
+	/* Sets initial values */
 	conn->cn_sockfd = sockfd;
-	conn->cn_event = event_new(evbase, sockfd, EV_READ,
+
+	/* Creates events for socket's reading and writing readiness */
+	conn->cn_rdevent = event_new(evbase, sockfd, EV_READ,
 	    http2_connection_read, conn);
-	if (conn->cn_event == NULL) {
+	conn->cn_wrevent = event_new(evbase, sockfd, EV_WRITE,
+	    http2_connection_write, conn);
+	if (conn->cn_rdevent == NULL || conn->cn_wrevent == NULL) {
 		prterr("event_new: failure.");
 		free(conn);
 		return NULL;
 	}
 
-	if (event_add(conn->cn_event, NULL) < 0) {
 	/* Arms reading event */
+	if (event_add(conn->cn_rdevent, NULL) < 0) {
 		prterr("event_add: failure.");
-		event_free(conn->cn_event);
+		event_free(conn->cn_rdevent);
 		free(conn);
 		return NULL;
 	}
@@ -69,7 +74,8 @@ http2_connection_free(struct http2_connection *conn)
 
 	close(conn->cn_sockfd);
 
-	event_free(conn->cn_event);
+	event_free(conn->cn_rdevent);
+	event_free(conn->cn_wrevent);
 
 	http2_frame_free(conn->cn_rxframe);
 
@@ -83,35 +89,6 @@ http2_connection_free(struct http2_connection *conn)
 	}
 
 	free(conn);
-}
-
-struct http2_frame *
-http2_frame_new(struct http2_connection *conn)
-{
-	struct http2_frame *fr;
-
-	fr = calloc(1, sizeof(*fr));
-	if (fr == NULL) {
-		perror("calloc");
-		return NULL;
-	}
-
-	fr->fr_conn = conn;
-
-	return fr;
-}
-
-static void
-http2_frame_free(struct http2_frame *fr)
-{
-	if (fr == NULL)
-		return;
-
-	if (fr->fr_event != NULL)
-		event_free(fr->fr_event);
-
-	free(fr->fr_buf);
-	free(fr);
 }
 
 static void
@@ -199,7 +176,8 @@ http2_connection_read(evutil_socket_t sockfd, short events, void *arg)
 		conn->cn_rxframe = NULL;
 	}
 
-	if (event_add(conn->cn_event, NULL) < 0) {
+	/* Rearms reading event */
+	if (event_add(conn->cn_rdevent, NULL) < 0) {
 		prterr("event_add: failure.");
 		goto error;
 	}
@@ -213,22 +191,50 @@ error:
 static void
 http2_connection_write(evutil_socket_t sockfd, short events, void *arg)
 {
+	struct http2_connection *conn;
 	struct http2_frame *fr;
 	ssize_t bytes;
 	size_t len;
 
-	fr = arg;
+	conn = arg;
+	fr = conn->cn_txframe;
 
-	len = fr->fr_header.fh_length - fr->fr_buflen;
-	bytes = send(sockfd, &fr->fr_buf[fr->fr_buflen], len, MSG_DONTWAIT);
-	if (bytes < 0) {
-		/* outbound traffic is clogged */
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
-			goto end;
-		else {
-			perror("send");
+	/* If not sent, creates header and sends it */
+	if (fr->fr_buflen == -1) {
+		char buf[HTTP2_FRAME_HEADER_SIZE];
+
+		/* length */
+		buf[0] = (fr->fr_header.fh_length & 0xFF0000U) >> 16;
+		buf[1] = (fr->fr_header.fh_length & 0x00FF00U) >>  8;
+		buf[2] = (fr->fr_header.fh_length & 0x0000FFU);
+		/* type */
+		buf[3] = fr->fr_header.fh_type;
+		/* flags */
+		buf[4] = fr->fr_header.fh_flags;
+		/* reserved bit + stream id */
+		buf[5] = (fr->fr_header.fh_streamid & 0x7F000000U) >> 24;
+		buf[6] = (fr->fr_header.fh_streamid & 0x00FF0000U) >> 16;
+		buf[7] = (fr->fr_header.fh_streamid & 0x0000FF00U) >>  8;
+		buf[8] = (fr->fr_header.fh_streamid & 0x000000FFU);
+		bytes = send(fr->fr_conn->cn_sockfd, buf, sizeof(buf), 0);
+		if (bytes < 0) {
+			prterrno("send");
 			goto error;
 		}
+		else if (bytes < sizeof(buf)) {
+			/* TODO handle this */
+			prterr("send: incomplete transmission of header.");
+			goto error;
+		}
+		fr->fr_buflen = 0;
+	}
+
+	/* Sends remaining bytes */
+	len = fr->fr_header.fh_length - fr->fr_buflen;
+	bytes = send(sockfd, &fr->fr_buf[fr->fr_buflen], len, 0);
+	if (bytes < 0) {
+		prterrno("send");
+		goto error;
 	}
 
 	fr->fr_buflen += bytes;
@@ -258,8 +264,8 @@ http2_connection_write(evutil_socket_t sockfd, short events, void *arg)
 		}
 	}
 
-end:
-	if (event_add(fr->fr_event, NULL) < 0) {
+	/* Rearms writing event */
+	if (event_add(fr->fr_conn->cn_wrevent, NULL) < 0) {
 		prterr("event_add: failure.");
 		goto error;
 	}
@@ -268,6 +274,36 @@ end:
 error:
 	http2_connection_free(fr->fr_conn);
 	return;
+}
+
+struct http2_frame *
+http2_frame_new(struct http2_connection *conn)
+{
+	struct http2_frame *fr;
+
+	fr = calloc(1, sizeof(*fr));
+	if (fr == NULL) {
+		prterrno("calloc");
+		return NULL;
+	}
+
+	fr->fr_conn = conn;
+	fr->fr_buflen = -1;
+
+	return fr;
+}
+
+/**
+ * http2_frame_free() does not and should not free next frames on list.
+ */
+static void
+http2_frame_free(struct http2_frame *fr)
+{
+	if (fr == NULL)
+		return;
+
+	free(fr->fr_buf);
+	free(fr);
 }
 
 static int
@@ -293,64 +329,23 @@ http2_frame_recv(struct http2_frame *fr)
 int
 http2_frame_send(struct http2_frame *fr)
 {
-	struct http2_frame_header *fh;
-	char buf[HTTP2_FRAME_HEADER_SIZE];
-	ssize_t bytes;
-
 	if (fr == NULL)
 		return -1;
 
-	fh = &fr->fr_header;
+	/* Enqueues frame */
+	if (fr->fr_conn->cn_txframe == NULL)
+		fr->fr_conn->cn_txframe = fr;
+	else
+		fr->fr_conn->cn_txlastframe->fr_next = fr;
+	fr->fr_conn->cn_txlastframe = fr;
 
-	/* Creates header and sends it */
-	/* length */
-	buf[0] = (fh->fh_length & 0xFF0000U) >> 16;
-	buf[1] = (fh->fh_length & 0x00FF00U) >>  8;
-	buf[2] = (fh->fh_length & 0x0000FFU);
-	/* type */
-	buf[3] = fh->fh_type;
-	/* flags */
-	buf[4] = fh->fh_flags;
-	/* reserved bit + stream id */
-	buf[5] = (fh->fh_streamid & 0x7F000000U) >> 24;
-	buf[6] = (fh->fh_streamid & 0x00FF0000U) >> 16;
-	buf[7] = (fh->fh_streamid & 0x0000FF00U) >>  8;
-	buf[8] = (fh->fh_streamid & 0x000000FFU);
-	bytes = send(fr->fr_conn->cn_sockfd, buf, sizeof(buf), 0);
-	if (bytes < 0) {
-		perror("send");
-		goto error;
-	}
-	else if (bytes < sizeof(buf)) {
-		/* TODO handle this */
-		prterr("send: incomplete transmission of header.");
-		goto error;
-	}
-
-	if (fr->fr_event != NULL)
-		event_free(fr->fr_event);
-
-	fr->fr_event = event_new(
-	    event_get_base(fr->fr_conn->cn_event),
-	    fr->fr_conn->cn_sockfd,
-	    EV_WRITE,
-	    http2_connection_write,
-	    fr);
-
-	if (fr->fr_event == NULL) {
-		prterr("event_new: failure.");
-		goto error;
-	}
-
-	if (event_add(fr->fr_event, NULL) < 0) {
+	/* Arms writing event */
+	if (event_add(fr->fr_conn->cn_wrevent, NULL) < 0) {
 		prterr("event_add: failure.");
-		goto error;
+		http2_connection_free(fr->fr_conn);
+		return -1;
 	}
 
 	return 0;
-
-error:
-	http2_connection_free(fr->fr_conn);
-	return -1;
 }
 
