@@ -1,7 +1,7 @@
 # Parts of this Makefile where took from
 # http://make.mad-scientist.net/papers/advanced-auto-dependency-generation/
 
-CFLAGS = -Werror -Wall -g -DDEBUG=1
+CFLAGS = -Werror -Wall -g -DDEBUG=2
 
 LIBS = -levent
 
