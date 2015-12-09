@@ -24,13 +24,6 @@ struct http2_frame_handler {
 	http2_frame_handler_f fh_handler;
 };
 
-struct http2_frame_header {
-	size_t fh_length;
-	uint8_t fh_type;
-	uint8_t fh_flags;
-	uint32_t fh_streamid;
-};
-
 /**
  * Frame structure
  *
@@ -41,7 +34,10 @@ struct http2_frame_header {
  */
 struct http2_frame {
 	struct http2_connection *fr_conn;
-	struct http2_frame_header fr_header;
+	size_t fr_length;
+	uint8_t fr_type;
+	uint8_t fr_flags;
+	uint32_t fr_streamid;
 	char *fr_buf;
 	size_t fr_buflen;
 	struct http2_frame *fr_next;
