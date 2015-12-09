@@ -58,7 +58,7 @@ main(int argc, char *argv[])
 	/* Opens the socket */
 	sockfd = client_connect(host, port);
 	if (sockfd < 0) {
-		prterr("client_connect: failure\n");
+		prterr("client_connect: failure.");
 		exit(1);
 	}
 
@@ -66,7 +66,7 @@ main(int argc, char *argv[])
 	evbase = event_base_new();
 	if (evbase == NULL) {
 		close(sockfd);
-		prterr("event_base_new: failure\n");
+		prterr("event_base_new: failure.");
 		exit(1);
 	}
 
@@ -84,11 +84,14 @@ main(int argc, char *argv[])
 
 	/* Dispatch events */
 	r = event_base_dispatch(evbase);
-	if (r < 0)
-		prterr("event_base_dispatch: failure\n");
 
-	http2_connection_free(conn);
+	if (r < 0) {
+		prterr("event_base_dispatch: failure.");
+		http2_connection_free(conn);
+	}
+
 	event_base_free(evbase);
+
 	return 0;
 }
 
@@ -107,22 +110,22 @@ client_connect(char *host, char *port)
 	h.ai_socktype = SOCK_STREAM;
 	e = getaddrinfo(host, port, &h, &ai);
 	if (e) {
-		prterr("getaddrinfo: %s\n", gai_strerror(e));
+		prterr("getaddrinfo: %s.", gai_strerror(e));
 		exit(1);
 	}
 	if (ai == NULL) {
-		prterr("getaddrinfo: no address found.\n");
+		prterr("getaddrinfo: no address found.");
 		exit(1);
 	}
 
 	/* Opens the socket and connect to the host */
 	fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 	if (fd < 0) {
-		perror("socket");
+		prterrno("socket");
 		exit(1);
 	}
 	if (connect(fd, ai->ai_addr, ai->ai_addrlen) < 0) {
-		perror("connect");
+		prterrno("connect");
 		exit(1);
 	}
 
